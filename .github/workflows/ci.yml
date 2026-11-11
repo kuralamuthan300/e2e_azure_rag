@@ -111,6 +111,16 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Trivy JSON ${{ matrix.name }}
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          format: json
+          output: trivy-${{ matrix.name }}.json
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: "0"
       - name: Trivy SARIF ${{ matrix.name }}
         if: always()
         uses: aquasecurity/trivy-action@v0.36.0
@@ -120,6 +130,15 @@ jobs:
           output: trivy-${{ matrix.name }}.sarif
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.name }}
+          path: |
+            trivy-${{ matrix.name }}.json
+            trivy-${{ matrix.name }}.sarif
+          if-no-files-found: warn
       - name: Upload Trivy SARIF
         if: always()
         continue-on-error: true
