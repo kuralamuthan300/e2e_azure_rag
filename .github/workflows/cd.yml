@@ -192,6 +192,7 @@ jobs:
           echo "Foundry eval run: $run_id"
 
           AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run output export "$run_id" \
+            --eval "${{ steps.eval_id.outputs.eval_id }}" \
             --output-file evals/reports/foundry-latest.json \
             --force --output json
           src/rag_agent/.venv/bin/python evals/foundry_gate.py \
