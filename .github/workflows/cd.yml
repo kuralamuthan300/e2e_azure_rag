@@ -150,6 +150,18 @@ jobs:
           uv sync --frozen
           uv run python -m rag_ingest --source plan/master_plan.md --index "$AZURE_SEARCH_INDEX_NAME"
 
+      - name: Resolve the Foundry evaluation
+        id: eval_id
+        run: |
+          set -euo pipefail
+          eval_id=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval list \
+            --name rag-agent-smoke --all \
+            --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
+            --output json | src/rag_agent/.venv/bin/python -c \
+            "import json,sys; items=json.load(sys.stdin)['items']; print(sorted(items, key=lambda e: (e.get('created_at', 0), e.get('modified_at', 0)))[-1]['id'])")
+          echo "Using Foundry eval: $eval_id"
+          echo "eval_id=$eval_id" >> "$GITHUB_OUTPUT"
+
       - name: Run the Foundry evaluation gate
         id: eval
         env:
@@ -163,7 +175,7 @@ jobs:
 
           AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run start \
             --path evals \
-            --eval rag-agent-smoke \
+            --eval "${{ steps.eval_id.outputs.eval_id }}" \
             --name "cd-${GITHUB_RUN_ID}" \
             --wait \
             --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
@@ -173,7 +185,7 @@ jobs:
             "import json; print(json.load(open('evals/reports/foundry-cd-run.json')).get('id', ''))")
           if [ -z "$run_id" ]; then
             run_id=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run list \
-              --path evals --eval rag-agent-smoke --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
+              --path evals --eval "${{ steps.eval_id.outputs.eval_id }}" --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
               --output json | src/rag_agent/.venv/bin/python -c \
               "import json,sys; data=json.load(sys.stdin); print((data[0] if isinstance(data, list) else data['data'][0])['id'])")
           fi
