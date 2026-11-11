@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -43,7 +43,7 @@ jobs:
         working-directory: src/rag_agent
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -65,7 +65,7 @@ jobs:
         working-directory: src/web_search_mcp
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -104,7 +104,7 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
       - name: Trivy scan ${{ matrix.name }}
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ matrix.name }}:ci
           format: table
@@ -113,7 +113,7 @@ jobs:
           severity: CRITICAL,HIGH
       - name: Trivy SARIF ${{ matrix.name }}
         if: always()
-        uses: aquasecurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ matrix.name }}:ci
           format: sarif

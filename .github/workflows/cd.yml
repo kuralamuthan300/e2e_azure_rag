@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -229,7 +229,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
@@ -323,7 +323,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
