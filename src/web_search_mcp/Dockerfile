@@ -27,6 +27,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . .
 
+# uv is only needed to build the virtual environment. Removing it from the
+# runtime image also removes the tool's embedded dependency SBOM from scans.
+RUN rm -f /bin/uv /bin/uvx
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

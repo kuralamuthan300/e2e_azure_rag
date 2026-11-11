@@ -45,4 +45,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
 RUN PYTHONDONTWRITEBYTECODE= .venv/bin/python -m compileall -q $(.venv/bin/python -c "import sysconfig as s; print(s.get_paths()['stdlib'], s.get_paths()['purelib'])") || true; \
     PYTHONDONTWRITEBYTECODE= .venv/bin/python -m compileall -q -x '[.]venv' .
 
+# uv is only needed to build the virtual environment. Removing it from the
+# runtime image also removes the tool's embedded dependency SBOM from scans.
+RUN rm -f /bin/uv /bin/uvx
+
 CMD ["/app/user_agent/.venv/bin/python", "-m", "langchain_azure_ai.agents.hosting.run", "--protocol", "responses"]
