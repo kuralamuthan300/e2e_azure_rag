@@ -706,6 +706,20 @@ MCP image:
 ├─ tools/
 │    └─ rag-tools.yaml         # Foundry Toolbox definition
 ├─ tests/                      # ingestion tests
+├─ evals/                      # dataset, thresholds, gates, promotion, continuous eval
+│    ├─ promote.py
+│    └─ continuous_eval.py
+├─ .github/
+│    ├─ workflows/
+│    │    ├─ ci.yml
+│    │    └─ cd.yml
+│    ├─ scripts/
+│    │    └─ setup-azd-env.sh
+│    └─ azd-env/
+│         └─ rag-agent-dev.env  # non-secret azd binding for CI
+├─ src/
+│    ├─ rag_agent/tests/        # deterministic graph and toolbox tests
+│    └─ web_search_mcp/tests/   # contract and SSRF tests
 ├─ docs/
 │    └─ rag-agent-sample.md
 ├─ plan/
@@ -718,16 +732,14 @@ Future additions:
 
 ```text
 ├─ infra/                      # Bicep modules for MCP Container App and supporting resources
-├─ evals/                      # golden dataset, evaluators, thresholds, gate
-├─ .github/workflows/          # CI/CD
-└─ src/web_search_mcp/         # custom web-search MCP server
+└─ src/web_search_mcp/         # custom web-search MCP server (already present)
 ```
 
 ---
 
 ## 13. Implementation Steps
 
-**Current status:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, and 4.1-4.6 are complete. Agent version `11` is deployed with deterministic RAG/web/hybrid/refuse routing, hybrid vector retrieval, structured citations, and the web-search MCP server. Local and Foundry evaluation baselines are recorded and gated. The next actionable work is **Steps 0.4-0.5 (GitHub OIDC)** and **Phase 5 — CI/CD**.
+**Current status:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, and 4.1-4.6 are complete. Agent version `11` is deployed with deterministic RAG/web/hybrid/refuse routing, hybrid vector retrieval, structured citations, and the web-search MCP server. Local and Foundry evaluation baselines are recorded and gated. Steps 0.4-0.5 and 5.1-5.7 are implemented; the first full CD run is being verified. The next actionable work is **Phase 6 — hardening and documentation**.
 
 **Completed out of sequence:**
 
@@ -751,8 +763,15 @@ Future additions:
 - [x] **Step 0.3** — Install the required `azd` extensions: `azure.ai.agents`, `azure.ai.projects`, and `azure.ai.toolboxes`.
   - Installed `azure.ai.agents` 1.0.0 with `azure.ai.projects`, `azure.ai.connections`, and `azure.ai.toolboxes` dependencies.
   - `azd` is not authenticated yet; Step 1.1 is blocked until the user runs `azd auth login`.
-- [ ] **Step 0.4** — Create GitHub environments `staging` and `production`, with required reviewers on production.
-- [ ] **Step 0.5** — Configure GitHub OIDC federation and Azure role assignments.
+- [x] **Step 0.4** — Create GitHub environments `staging` and `production`, with required reviewers on production.
+  - Both environments restrict deployments to `main`.
+  - `production` requires reviewer approval (`kuralamuthan300`).
+- [x] **Step 0.5** — Configure GitHub OIDC federation and Azure role assignments.
+  - User-assigned managed identity `id-rag-agent-github` in `rg-rag-agent-dev-foundry`.
+  - Federated credentials for `repo:kuralamuthan300/e2e_azure_rag:environment:staging` and `:production`.
+  - Roles: `Contributor` + `User Access Administrator` on both resource groups, `Foundry User` on the project, `Search Index Data Contributor` + `Search Service Contributor` on the search service, and `Cognitive Services OpenAI User` on the Foundry account.
+  - No Azure credentials are stored in GitHub; only client, tenant, and subscription IDs are variables.
+  - The project and account managed identities also received `Foundry User`, `Foundry Project Manager`, `Log Analytics Reader`, and `Monitoring Reader` so trace-based continuous evaluation can read Application Insights.
 - [x] **Step 0.6** — ~~Create or obtain a Brave Search API key.~~ Cancelled: the project uses free search backends with no Brave Search API key.
 
 ### Phase 1: Scaffold Foundry LangGraph agent
@@ -889,13 +908,25 @@ Exit criteria:
 
 ### Phase 5: CI/CD
 
-- [ ] **Step 5.1** — Add the PR CI workflow with linting, typing, unit tests, graph tests, MCP contract tests, Docker builds, and Trivy.
-- [ ] **Step 5.2** — Add the OIDC-based CD workflow.
-- [ ] **Step 5.3** — Deploy a new agent version with `azd deploy`.
-- [ ] **Step 5.4** — Run the Foundry evaluation gate.
-- [ ] **Step 5.5** — Promote the evaluated version only if the gate passes.
-- [ ] **Step 5.6** — Run a production smoke test.
-- [ ] **Step 5.7** — Enable continuous evaluation.
+- [x] **Step 5.1** — Add the PR CI workflow with linting, typing, unit tests, graph tests, MCP contract tests, Docker builds, and Trivy.
+  - `.github/workflows/ci.yml` runs root ingestion, agent, and MCP jobs plus a Docker/Trivy matrix.
+  - 50 tests: 22 ingestion/config, 16 agent graph/toolbox, 12 MCP contract/SSRF.
+  - Trivy blocks on fixable `CRITICAL` findings and publishes `HIGH` JSON/SARIF artifacts.
+- [x] **Step 5.2** — Add the OIDC-based CD workflow.
+  - `.github/workflows/cd.yml` logs in with `azure/login@v2` and `azd config set auth.useAzCliAuth true`.
+  - Pinned azd extensions: `azure.ai.agents` 1.0.0, `azure.ai.projects` 1.0.0, `azure.ai.toolboxes` 1.0.0, `azure.ai.evaluations` 1.0.0-beta.2, `microsoft.foundry` 1.0.0.
+  - The `rag-agent-dev` azd environment is reconstructed from `.github/azd-env/rag-agent-dev.env`.
+- [x] **Step 5.3** — Deploy a new agent version with `azd deploy`.
+  - CD pins the endpoint to the previously promoted version, runs `azd provision`, deploys `rag-agent`, and refreshes the search index.
+- [x] **Step 5.4** — Run the Foundry evaluation gate.
+  - `azd ai eval run start` evaluates the newest version; `evals/foundry_gate.py` enforces `foundry_pass_rate`.
+- [x] **Step 5.5** — Promote the evaluated version only if the gate passes.
+  - `evals/promote.py` preserves the endpoint protocol and Entra auth configuration while replacing the fixed-ratio version selector.
+  - A failed gate leaves traffic on the previous version.
+- [x] **Step 5.6** — Run a production smoke test.
+  - The production job promotes the same immutable version and invokes `rag-agent --version N` with a document-grounded question.
+- [x] **Step 5.7** — Enable continuous evaluation.
+  - `evals/continuous_eval.py` creates/updates an hourly trace evaluation schedule scoped to `rag-agent:<version>` with relevance, tool-call accuracy, and task-adherence evaluators.
 
 Exit criteria:
 
@@ -920,11 +951,11 @@ Exit criteria:
 - [ ] A partially covered question returns `route: hybrid`.
 - [ ] An unanswerable question returns `route: refuse`.
 - [ ] The agent refuses to answer from model memory when evidence is missing.
-- [ ] `azd deploy` creates a new immutable agent version.
+- [x] `azd deploy` creates a new immutable agent version.
 - [ ] Foundry evaluation passes thresholds before promotion.
 - [ ] GitHub Actions deploys using OIDC with no stored Azure credentials.
-- [ ] Web MCP rejects private/internal URLs.
-- [ ] No secrets are present in the repository or container images.
+- [x] Web MCP rejects private/internal URLs.
+- [x] No secrets are present in the repository or container images.
 - [ ] Foundry traces are visible in Application Insights.
 - [ ] Continuous evaluation is enabled for production.
 
@@ -1055,19 +1086,16 @@ Low-cost choices:
 
 ## 21. Next Step
 
-**Current position:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, and 4.1-4.6 are complete. Agent version `11` is deployed and active with RAG, web, hybrid, and refusal routing plus structured citations. `rag-docs` contains 15 chunks from the updated `plan/master_plan.md`.
+**Current position:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, 4.1-4.6, 0.4-0.5, and 5.1-5.7 are implemented. Agent version `11` is deployed and active with RAG, web, hybrid, and refusal routing plus structured citations. The endpoint is now pinned to version `11` instead of `@latest`. `rag-docs` contains the indexed master plan. PR CI is green.
 
-**Next action:** configure **Steps 0.4-0.5** (GitHub environments and OIDC), then execute **Phase 5 — CI/CD**.
+**Next action:** complete the first full CD run (staging deploy, Foundry evaluation gate, promotion, production smoke test, continuous evaluation), then start **Phase 6 — hardening and documentation**.
 
 Remaining order:
 
-2. **Step 0.4-0.5** — Configure GitHub environments and OIDC.
-3. **Step 5.1-5.7** — Add OIDC-based CD with agent version promotion.
-4. **Step 6.1-6.5** — Harden, document, and review cost.
+1. **Phase 5 verification** — merge `task/cicd`, run CD, verify the gate blocks a failing run and promotes a passing run.
+2. **Step 6.1-6.5** — Harden, document, and review cost.
 
-Deferred: Azure AI Search integrated vectorization is complete; Brave Search is not used.
-
-GitHub OIDC setup (Step 0.4-0.5) can be completed before Phase 5; it is not required for local agent development.
+Deferred: Azure AI Search integrated vectorization is complete; Brave Search is not used. MCP Container App deployment remains manual until `infra/` exists.
 
 ---
 
@@ -1075,13 +1103,14 @@ GitHub OIDC setup (Step 0.4-0.5) can be completed before Phase 5; it is not requ
 
 ### Repository state
 
-- Branch: `task/setup`
-- Latest commit before handoff: see `git log -1`
+- Branch: `task/cicd` (Phase 5), merged into `main`
 - Root `azd` project at `azure.yaml`
 - Agent source: `src/rag_agent/`
 - Ingestion CLI: `src/rag_ingest/`
 - Web MCP server: `src/web_search_mcp/`
-- Evaluation: `evals/`
+- Evaluation and promotion: `evals/`
+- CI/CD: `.github/workflows/ci.yml` and `.github/workflows/cd.yml`
+- CI azd binding: `.github/azd-env/rag-agent-dev.env`
 - Toolbox definition: `tools/rag-tools.yaml`
 
 ### Deployed resources
@@ -1103,6 +1132,12 @@ MCP Container App: web-search-mcp
 MCP environment:   rag-agent-env
 MCP FQDN:          web-search-mcp.wonderfulwave-cfeafd90.southindia.azurecontainerapps.io
 Foundry eval:      rag-agent-smoke
+Continuous eval:   rag-agent-continuous-eval (hourly trace schedule)
+GitHub OIDC MI:    id-rag-agent-github
+MI client ID:      d5043dbe-bddc-41b1-826f-41b7ccb21a39
+MI principal ID:   9115c951-cea6-4f99-964c-9f42d79e2451
+Visibility:        public repository
+Environments:      staging, production (production requires review)
 ```
 
 ### Important implementation details
@@ -1119,6 +1154,13 @@ Foundry eval:      rag-agent-smoke
 - The search service system-assigned identity needs `Cognitive Services OpenAI User` on the Foundry resource for the integrated vectorizer.
 - `azd` commands must use `AZURE_DEV_USER_AGENT=microsoft_foundry_skill`.
 - `azd` is authenticated; never run `azd auth login` on the user's behalf.
+- The GitHub OIDC identity is a user-assigned managed identity, not an app registration with a client secret.
+- The agent endpoint is pinned to a fixed version (`11` initially). New deploys create versions without traffic until `evals/promote.py` runs.
+- The Foundry eval target intentionally has no pinned version, so it evaluates the newest deployed version.
+- A failed Foundry gate leaves the endpoint on the previously promoted version.
+- Continuous evaluation for a hosted agent uses an hourly recurrence schedule with an `azure_ai_traces` data source, not an evaluation rule. Evaluation rules reject hosted agents.
+- The Foundry project and account managed identities need `Foundry User`, `Foundry Project Manager`, `Log Analytics Reader`, and `Monitoring Reader` for trace evaluation.
+- Trivy blocks on fixable `CRITICAL` findings. `HIGH` findings are published as JSON/SARIF artifacts because the Python base image SBOM lists build-time packages that are not present in the runtime venv.
 
 ### Useful commands
 
@@ -1155,18 +1197,35 @@ AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run start --path evals 
 AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run output export <run-id> \
   --output-file evals/reports/foundry-latest.json --force --output json
 uv run python evals/foundry_gate.py --run evals/reports/foundry-latest.json --thresholds evals/thresholds.yaml
+
+# Promotion and rollback
+AZURE_TOKEN_CREDENTIALS=AzureCliCredential \
+FOUNDRY_PROJECT_ENDPOINT=https://e2e-azure-rag-resource.services.ai.azure.com/api/projects/e2e-azure-rag \
+src/rag_agent/.venv/bin/python evals/promote.py --current
+src/rag_agent/.venv/bin/python evals/promote.py --version <version>
+
+# Continuous evaluation
+AZURE_TOKEN_CREDENTIALS=AzureCliCredential \
+FOUNDRY_PROJECT_ENDPOINT=https://e2e-azure-rag-resource.services.ai.azure.com/api/projects/e2e-azure-rag \
+AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-5.4-mini \
+src/rag_agent/.venv/bin/python evals/continuous_eval.py --version <version>
+src/rag_agent/.venv/bin/python evals/continuous_eval.py --check
+
+# CD and rollback
+gh workflow run cd.yml --ref main
+gh workflow run cd.yml --ref main -f rollback_to_version=<version>
 ```
 
 ### Known limitations and next work
 
-- Phase 5 CI/CD is not implemented yet.
-- GitHub environments and OIDC federation (Steps 0.4-0.5) are not configured.
+- The first full CD run and the deliberate failing-gate run still need to be recorded.
 - Foundry evaluators currently run against the agent's latest version; do not add unsupported `agentVersion` keys to `azure.eval.yaml`.
 - Web search quality and availability can vary because it depends on free search backends.
-- Continuous evaluation is not enabled yet.
-- Add `infra/` Bicep for the MCP Container App and supporting resources as MCP moves toward CI/CD.
+- The MCP Container App is still deployed manually. Add `infra/` Bicep before adding an MCP deployment job to CD.
+- The continuous evaluation schedule is hourly and trace-based; it needs Application Insights traces from production traffic to produce scores.
+- Trivy reports `HIGH` findings from the Python base image SBOM but only blocks on fixable `CRITICAL` findings.
 - Phase 6 hardening (prompt-injection tests, rate limits, alerts, runbook, cost review) is not done.
 
 ### Suggested next prompt
 
-> Continue the RAG agent project in this repository. Read `plan/master_plan.md`, including the Handoff Notes section. Start with Steps 0.4-0.5 (GitHub environments and OIDC federation) and then implement Phase 5 CI/CD: PR CI with lint/type/unit/graph/MCP contract tests, Foundry eval gate, OIDC-based `azd provision`/`azd deploy`, agent version promotion, production smoke test, and continuous evaluation. Keep the existing deterministic LangGraph routing, hybrid AI Search retrieval, structured citations, and web-search MCP server intact. Do not use Brave Search. Update `plan/master_plan.md` as you complete steps.
+> Continue the RAG agent project in this repository. Read `plan/master_plan.md`, including the Handoff Notes section. Phase 5 CI/CD is implemented. Verify the first CD run and the failing-gate rollback behavior, record the results, then start Phase 6: prompt-injection tests, rate limiting and request size limits, structured logging/tracing/alerts, runbook and architecture docs, and a cost/scaling review. Keep the deterministic LangGraph routing, hybrid Azure AI Search retrieval, structured citations, and web-search MCP server intact. Do not use Brave Search. Update `plan/master_plan.md` as you complete steps.
