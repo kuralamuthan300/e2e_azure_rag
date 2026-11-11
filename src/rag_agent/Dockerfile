@@ -1,7 +1,23 @@
 FROM ghcr.io/astral-sh/uv:0.11.7 AS uv
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 ENV PYTHONNOUSERSITE=1
+
+# Apply Debian security updates so the runtime image does not ship known
+# base-image vulnerabilities. The zip CLI is not used at runtime.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get purge -y zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the base image's system Python packages at patched versions. The agent
+# runs from its own virtual environment, but image scanners also see the system
+# site-packages shipped by the Python base image.
+RUN python -m pip install --no-cache-dir --upgrade \
+    "setuptools>=78.1.1" \
+    "msgpack>=1.2.3" \
+    "urllib3>=2.8.0" \
+    && rm -rf /root/.cache/pip
 
 COPY --from=uv /uv /uvx /bin/
 
@@ -28,5 +44,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
 # bytecode *writes*, not *reads*, so images that set it still benefit.
 RUN PYTHONDONTWRITEBYTECODE= .venv/bin/python -m compileall -q $(.venv/bin/python -c "import sysconfig as s; print(s.get_paths()['stdlib'], s.get_paths()['purelib'])") || true; \
     PYTHONDONTWRITEBYTECODE= .venv/bin/python -m compileall -q -x '[.]venv' .
+
+# uv is only needed to build the virtual environment. Removing it from the
+# runtime image also removes the tool's embedded dependency SBOM from scans.
+RUN rm -f /bin/uv /bin/uvx
 
 CMD ["/app/user_agent/.venv/bin/python", "-m", "langchain_azure_ai.agents.hosting.run", "--protocol", "responses"]

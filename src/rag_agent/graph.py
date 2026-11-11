@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from grader import ContextGrader
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
+
+from grader import ContextGrader
 from llm import FoundryLLM
 from models import Citation, ContextGrade, RetrievedDocument, WebDocument
 from toolbox import ToolboxClient, ToolboxError
@@ -263,11 +264,12 @@ async def answer_hybrid(
             f"{document.content[:MAX_CONTEXT_CHARS]}"
         )
     offset = len(documents)
-    for index, document in enumerate(web_documents, start=offset + 1):
-        citations.append(Citation.from_web_document(index, document))
-        content = (document.text or document.snippet)[:MAX_CONTEXT_CHARS]
+    for index, web_document in enumerate(web_documents, start=offset + 1):
+        citations.append(Citation.from_web_document(index, web_document))
+        content = (web_document.text or web_document.snippet)[:MAX_CONTEXT_CHARS]
         blocks.append(
-            f"[{index}] Web: {document.title}\nURL: {document.url}\n{content}"
+            f"[{index}] Web: {web_document.title}\n"
+            f"URL: {web_document.url}\n{content}"
         )
 
     answer = await _generate_answer(

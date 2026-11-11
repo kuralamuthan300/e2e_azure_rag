@@ -3,6 +3,22 @@ FROM python:3.13-slim
 
 ENV PYTHONNOUSERSITE=1
 
+# Apply Debian security updates so the runtime image does not ship known
+# base-image vulnerabilities. The zip CLI is not used at runtime.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get purge -y zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Keep the base image's system Python packages at patched versions. The MCP
+# server runs from its own virtual environment, but image scanners also see the
+# system site-packages shipped by the Python base image.
+RUN python -m pip install --no-cache-dir --upgrade \
+    "setuptools>=78.1.1" \
+    "msgpack>=1.2.3" \
+    "urllib3>=2.8.0" \
+    && rm -rf /root/.cache/pip
+
 COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
@@ -10,6 +26,10 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY . .
+
+# uv is only needed to build the virtual environment. Removing it from the
+# runtime image also removes the tool's embedded dependency SBOM from scans.
+RUN rm -f /bin/uv /bin/uvx
 
 EXPOSE 8000
 

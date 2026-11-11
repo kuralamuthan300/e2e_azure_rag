@@ -6,8 +6,9 @@ from typing import Any
 
 from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
-from models import ContextGrade, RetrievedDocument
 from openai import AsyncOpenAI
+
+from models import ContextGrade, RetrievedDocument
 
 logger = logging.getLogger(__name__)
 

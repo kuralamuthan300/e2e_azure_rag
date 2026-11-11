@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  ingestion:
+    name: Lint, type-check, and test ingestion
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: mypy
+        run: uv run mypy
+      - name: pytest
+        run: uv run pytest
+
+  agent:
+    name: Lint, type-check, and test agent
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/rag_agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: src/rag_agent/uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: mypy
+        run: uv run mypy
+      - name: Graph and toolbox tests
+        run: uv run pytest
+
+  mcp:
+    name: Test web search MCP contract
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/web_search_mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: src/web_search_mcp/uv.lock
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check .
+      - name: Contract and security tests
+        run: uv run pytest
+
+  containers:
+    name: Build and scan containers
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rag-agent
+            context: src/rag_agent
+          - name: web-search-mcp
+            context: src/web_search_mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          load: true
+          tags: ${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      # Block on fixable criticals. High findings are still reported in the
+      # JSON/SARIF artifacts and code scanning for follow-up. The Python base
+      # image publishes an SBOM that lists build-time packages (pip's vendored
+      # msgpack/urllib3 and setuptools) even after the runtime venv upgrades
+      # them, so a HIGH gate produces false positives.
+      - name: Trivy scan ${{ matrix.name }}
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL
+      - name: Trivy JSON ${{ matrix.name }}
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          format: json
+          output: trivy-${{ matrix.name }}.json
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+      - name: Trivy SARIF ${{ matrix.name }}
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.name }}:ci
+          format: sarif
+          output: trivy-${{ matrix.name }}.sarif
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Upload Trivy reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.name }}
+          path: |
+            trivy-${{ matrix.name }}.json
+            trivy-${{ matrix.name }}.sarif
+          if-no-files-found: warn
+      - name: Upload Trivy SARIF
+        if: always()
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-${{ matrix.name }}.sarif
+          category: ${{ matrix.name }}

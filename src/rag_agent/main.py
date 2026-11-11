@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import logging
 
-from config import AgentSettings
 from dotenv import load_dotenv
+
+from config import AgentSettings
 from grader import ContextGrader
 from graph import build_graph
 from llm import FoundryLLM

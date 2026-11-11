@@ -10,6 +10,7 @@ from azure.core.credentials import TokenCredential
 from azure.identity import DefaultAzureCredential
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
 from models import RetrievedDocument, WebDocument
 
 _AZURE_AI_SCOPE = "https://ai.azure.com/.default"
