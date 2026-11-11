@@ -66,6 +66,60 @@ uv run python evals/foundry_gate.py \
 The local deterministic gate is the fast PR gate. The Foundry suite is the
 staged quality gate and the source for continuous evaluation.
 
+## Promotion and rollback
+
+The Foundry evaluation target has no pinned version, so it evaluates the newest
+immutable agent version. CD uses that behavior to gate promotion:
+
+1. Read the currently promoted version with `promote.py --current`.
+2. Pin the endpoint to that version so a new deploy receives no traffic.
+3. Deploy and evaluate the new version.
+4. Promote the evaluated version only after the gate passes.
+
+```bash
+# Show the currently promoted version
+src/rag_agent/.venv/bin/python evals/promote.py --current
+
+# Promote a version (100% of endpoint traffic)
+src/rag_agent/.venv/bin/python evals/promote.py --version 12
+
+# Roll back to a previous version
+src/rag_agent/.venv/bin/python evals/promote.py --version 11
+```
+
+`promote.py` preserves the endpoint's protocol configuration and Entra
+authorization schemes while replacing the fixed-ratio version selector.
+
+## Continuous evaluation
+
+Evaluation rules only support prompt agents, so hosted agents are monitored with
+a recurring trace evaluation instead:
+
+```bash
+# Create or refresh the hourly schedule for the newest version
+src/rag_agent/.venv/bin/python evals/continuous_eval.py
+
+# Point the schedule at a specific promoted version
+src/rag_agent/.venv/bin/python evals/continuous_eval.py --version 12
+
+# Inspect the schedule
+src/rag_agent/.venv/bin/python evals/continuous_eval.py --check
+```
+
+The schedule uses an `azure_ai_traces` data source scoped to
+`rag-agent:<version>`, a one-hour lookback, and the
+`rag-agent-continuous` eval group. It scores relevance, tool call accuracy, and
+task adherence from Application Insights traces. The Foundry project managed
+identity needs `Log Analytics Reader` and `Monitoring Reader` on Application
+Insights and its Log Analytics workspace, plus `Foundry User` on the project.
+
+## CI/CD
+
+`.github/workflows/cd.yml` runs the batch gate in the `staging` environment and
+promotes the same immutable version in the `production` environment. A threshold
+miss leaves the endpoint on the previously promoted version, so a failing
+evaluation never receives production traffic.
+
 ## Baseline
 
 The first local baseline produced:

@@ -128,3 +128,81 @@ uv run pytest
 uv run ruff check .
 uv run mypy src/rag_ingest
 ```
+
+Agent graph tests and the web MCP contract tests run with their own lockfiles:
+
+```bash
+(cd src/rag_agent && uv run ruff check . && uv run mypy && uv run pytest)
+(cd src/web_search_mcp && uv run ruff check . && uv run pytest)
+```
+
+## CI/CD
+
+### Pull request CI
+
+`.github/workflows/ci.yml` runs on pull requests and is also called by CD:
+
+- Root ingestion: Ruff, mypy, pytest
+- Agent: Ruff, mypy, deterministic LangGraph routing and toolbox tests
+- Web MCP: Ruff, MCP contract tests, URL/SSRF tests
+- Containers: Docker build for both images plus Trivy `HIGH,CRITICAL` scan
+
+No Azure access is required for the PR path.
+
+### Deployment
+
+`.github/workflows/cd.yml` runs on pushes to `main` and on manual dispatch:
+
+1. Azure login through GitHub OIDC. No Azure credentials are stored in GitHub.
+2. Reconstruct the `rag-agent-dev` azd environment from
+   `.github/azd-env/rag-agent-dev.env` (identifiers and endpoints only).
+3. Read the currently promoted agent version and keep the endpoint pinned to it.
+4. `azd provision` then `azd deploy rag-agent`, which creates a new immutable
+   agent version with no production traffic.
+5. Refresh the Azure AI Search index from `plan/master_plan.md`.
+6. Run the Foundry evaluation `rag-agent-smoke` against the newest version and
+   enforce `foundry_pass_rate` from `evals/thresholds.yaml`.
+7. Promote the evaluated version with `evals/promote.py` only if the gate passes.
+8. Smoke-test the promoted version and enable hourly trace-based continuous
+   evaluation with `evals/continuous_eval.py`.
+
+The `staging` and `production` GitHub environments gate the two jobs. Production
+requires a reviewer approval and accepts deployments from `main` only.
+
+To roll back, run the CD workflow manually with `rollback_to_version` set to a
+previous immutable version. The rollback job promotes that version and smoke-tests
+it.
+
+### GitHub configuration
+
+Repository variables (no secrets):
+
+```text
+AZURE_CLIENT_ID                  Client ID of the user-assigned managed identity
+AZURE_TENANT_ID                  Microsoft Entra tenant ID
+AZURE_SUBSCRIPTION_ID            Target subscription
+AZURE_LOCATION                   southindia
+AZURE_ENV_NAME                   rag-agent-dev
+AZURE_AI_PROJECT_NAME            e2e-azure-rag
+AZURE_AI_MODEL_DEPLOYMENT_NAME   gpt-5.4-mini
+AZURE_RESOURCE_GROUP             rg-kuralamuthan300-9046
+AZURE_FOUNDRY_RESOURCE_GROUP     rg-rag-agent-dev-foundry
+FOUNDRY_PROJECT_ENDPOINT         https://<account>.services.ai.azure.com/api/projects/<project>
+AZURE_AI_PROJECT_ID              Foundry project ARM ID
+AZURE_AI_PROJECT_ACR_CONNECTION_NAME
+AZURE_CONTAINER_REGISTRY_ENDPOINT
+AZURE_CONTAINER_REGISTRY_RESOURCE_ID
+AZURE_SEARCH_ENDPOINT
+AZURE_SEARCH_INDEX_NAME
+AZURE_OPENAI_ENDPOINT
+AZURE_EMBEDDING_DEPLOYMENT
+```
+
+The OIDC identity needs:
+
+- `Contributor` and `User Access Administrator` on `rg-kuralamuthan300-9046`
+  and `rg-rag-agent-dev-foundry`
+- `Foundry User` on the Foundry project
+- `Search Index Data Contributor` and `Search Service Contributor` on the
+  Azure AI Search service
+- `Cognitive Services OpenAI User` on the Foundry account

@@ -1,0 +1,396 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      rollback_to_version:
+        description: "Existing immutable agent version to promote (rollback). Leave empty for a normal deploy."
+        required: false
+        default: ""
+      eval_pass_rate:
+        description: "Override the Foundry pass-rate gate (0-1). Leave empty to use evals/thresholds.yaml."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+env:
+  AZD_ENV_NAME: rag-agent-dev
+  FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
+  AZURE_AI_MODEL_DEPLOYMENT_NAME: ${{ vars.AZURE_AI_MODEL_DEPLOYMENT_NAME }}
+  AZURE_SEARCH_ENDPOINT: ${{ vars.AZURE_SEARCH_ENDPOINT }}
+  AZURE_SEARCH_INDEX_NAME: ${{ vars.AZURE_SEARCH_INDEX_NAME }}
+  AZURE_OPENAI_ENDPOINT: ${{ vars.AZURE_OPENAI_ENDPOINT }}
+  AZURE_EMBEDDING_DEPLOYMENT: ${{ vars.AZURE_EMBEDDING_DEPLOYMENT }}
+  SMOKE_QUESTION: "What are the locked technology choices for the RAG agent?"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  ci:
+    name: Run PR quality gates
+    uses: ./.github/workflows/ci.yml
+
+  deploy-staging:
+    name: Deploy and evaluate staging
+    needs: ci
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rollback_to_version == '' }}
+    environment: staging
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous_version: ${{ steps.previous.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - uses: Azure/setup-azd@v2
+
+      - name: Install pinned azd extensions
+        run: |
+          set -euo pipefail
+          for extension in \
+            "azure.ai.agents 1.0.0" \
+            "azure.ai.projects 1.0.0" \
+            "azure.ai.toolboxes 1.0.0" \
+            "azure.ai.evaluations 1.0.0-beta.2" \
+            "microsoft.foundry 1.0.0"
+          do
+            set -- $extension
+            AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ext install "$1" \
+              --version "$2" --force --no-prompt
+          done
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure azd authentication
+        run: |
+          set -euo pipefail
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set auth.useAzCliAuth true
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set defaults.subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          az account show --query "{subscription:id,tenant:tenantId}" -o json
+
+      - name: Configure azd environment
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: ./.github/scripts/setup-azd-env.sh
+
+      - name: Install agent evaluation tooling
+        working-directory: src/rag_agent
+        run: uv sync --frozen
+
+      - name: Read currently promoted version
+        id: previous
+        run: |
+          set -euo pipefail
+          current=$(src/rag_agent/.venv/bin/python evals/promote.py --current --json)
+          echo "$current"
+          version=$(echo "$current" | src/rag_agent/.venv/bin/python -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          if [ -z "$version" ] || [ "$version" = "None" ]; then
+            echo "Could not resolve the currently promoted agent version." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Keep production traffic on the previously promoted version
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/promote.py --version "${{ steps.previous.outputs.version }}"
+
+      - name: Provision Azure resources
+        run: AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd provision --no-prompt
+
+      - name: Deploy a new immutable agent version
+        run: AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy rag-agent --no-prompt --timeout 1800
+
+      - name: Read newly deployed version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd env get-value AGENT_RAG_AGENT_VERSION)
+          if [ -z "$version" ]; then
+            version=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent show --output json \
+              | src/rag_agent/.venv/bin/python -c "import json,sys; print(json.load(sys.stdin)['version'])")
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Deployed rag-agent version $version"
+
+      - name: Re-assert the previous version after deploy
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/promote.py --version "${{ steps.previous.outputs.version }}"
+
+      - name: Refresh the Azure AI Search index
+        env:
+          AZURE_TOKEN_CREDENTIALS: AzureCliCredential
+          AZURE_OPENAI_API_VERSION: "2024-10-21"
+          AZURE_EMBEDDING_DIMENSIONS: "1536"
+          AZURE_EMBEDDING_BATCH_SIZE: "8"
+        run: |
+          set -euo pipefail
+          uv sync --frozen
+          uv run python -m rag_ingest --source plan/master_plan.md --index "$AZURE_SEARCH_INDEX_NAME"
+
+      - name: Run the Foundry evaluation gate
+        id: eval
+        env:
+          EVAL_PASS_RATE_OVERRIDE: ${{ inputs.eval_pass_rate }}
+        run: |
+          set -euo pipefail
+          threshold="${EVAL_PASS_RATE_OVERRIDE:-$(src/rag_agent/.venv/bin/python -c "import yaml; print(yaml.safe_load(open('evals/thresholds.yaml'))['foundry_pass_rate'])")}"
+          thresholds="/tmp/rag-thresholds.yaml"
+          sed "s/^foundry_pass_rate:.*/foundry_pass_rate: ${threshold}/" evals/thresholds.yaml > "$thresholds"
+          echo "Foundry pass-rate threshold: $threshold"
+
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run start \
+            --path evals \
+            --eval rag-agent-smoke \
+            --name "cd-${GITHUB_RUN_ID}" \
+            --wait \
+            --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
+            --output json | tee evals/reports/foundry-cd-run.json
+
+          run_id=$(src/rag_agent/.venv/bin/python -c \
+            "import json; print(json.load(open('evals/reports/foundry-cd-run.json')).get('id', ''))")
+          if [ -z "$run_id" ]; then
+            run_id=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run list \
+              --path evals --eval rag-agent-smoke --project-endpoint "$FOUNDRY_PROJECT_ENDPOINT" \
+              --output json | src/rag_agent/.venv/bin/python -c \
+              "import json,sys; data=json.load(sys.stdin); print((data[0] if isinstance(data, list) else data['data'][0])['id'])")
+          fi
+          echo "Foundry eval run: $run_id"
+
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run output export "$run_id" \
+            --output-file evals/reports/foundry-latest.json \
+            --force --output json
+          src/rag_agent/.venv/bin/python evals/foundry_gate.py \
+            --run evals/reports/foundry-latest.json \
+            --thresholds "$thresholds"
+
+      - name: Promote the evaluated version
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/promote.py --version "${{ steps.version.outputs.version }}"
+
+      - name: Smoke-test the promoted version
+        run: |
+          set -euo pipefail
+          response=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent invoke rag-agent \
+            --version "${{ steps.version.outputs.version }}" \
+            --new-session "$SMOKE_QUESTION" 2>&1)
+          echo "$response"
+          echo "$response" | grep -qi "LangGraph"
+          echo "$response" | grep -q "Sources:"
+          echo "Staging smoke test passed for version ${{ steps.version.outputs.version }}"
+
+      - name: Write staging summary
+        if: always()
+        run: |
+          {
+            echo "## Staging deployment"
+            echo ""
+            echo "- Previous promoted version: \`${{ steps.previous.outputs.version }}\`"
+            echo "- Deployed version: \`${{ steps.version.outputs.version }}\`"
+            echo "- Evaluation gate: \`${{ steps.eval.outcome }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evaluation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-eval-${{ github.run_id }}-staging
+          path: evals/reports/*.json
+          if-no-files-found: warn
+
+  deploy-production:
+    name: Promote and verify production
+    needs: deploy-staging
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.rollback_to_version == '' }}
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - uses: Azure/setup-azd@v2
+
+      - name: Install pinned azd extensions
+        run: |
+          set -euo pipefail
+          for extension in \
+            "azure.ai.agents 1.0.0" \
+            "azure.ai.projects 1.0.0" \
+            "azure.ai.toolboxes 1.0.0" \
+            "azure.ai.evaluations 1.0.0-beta.2" \
+            "microsoft.foundry 1.0.0"
+          do
+            set -- $extension
+            AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ext install "$1" \
+              --version "$2" --force --no-prompt
+          done
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure azd authentication
+        run: |
+          set -euo pipefail
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set auth.useAzCliAuth true
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set defaults.subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Configure azd environment
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: ./.github/scripts/setup-azd-env.sh
+
+      - name: Install agent evaluation tooling
+        working-directory: src/rag_agent
+        run: uv sync --frozen
+
+      - name: Provision Azure resources
+        run: AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd provision --no-prompt
+
+      - name: Promote the evaluated immutable version
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/promote.py \
+            --version "${{ needs.deploy-staging.outputs.version }}"
+
+      - name: Production smoke test
+        run: |
+          set -euo pipefail
+          response=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent invoke rag-agent \
+            --version "${{ needs.deploy-staging.outputs.version }}" \
+            --new-session "$SMOKE_QUESTION" 2>&1)
+          echo "$response"
+          echo "$response" | grep -qi "LangGraph"
+          echo "$response" | grep -q "Sources:"
+          echo "Production smoke test passed for version ${{ needs.deploy-staging.outputs.version }}"
+
+      - name: Enable continuous evaluation
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/continuous_eval.py \
+            --version "${{ needs.deploy-staging.outputs.version }}" \
+            --lookback-hours 1 \
+            --max-traces 50
+
+      - name: Write production summary
+        if: always()
+        run: |
+          {
+            echo "## Production promotion"
+            echo ""
+            echo "- Evaluated and promoted version: \`${{ needs.deploy-staging.outputs.version }}\`"
+            echo "- Previous version retained for rollback: \`${{ needs.deploy-staging.outputs.previous_version }}\`"
+            echo "- Continuous evaluation: hourly trace evaluation"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    name: Roll back production
+    needs: ci
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rollback_to_version != '' }}
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "**/uv.lock"
+
+      - uses: Azure/setup-azd@v2
+
+      - name: Install pinned azd extensions
+        run: |
+          set -euo pipefail
+          for extension in \
+            "azure.ai.agents 1.0.0" \
+            "azure.ai.projects 1.0.0" \
+            "azure.ai.toolboxes 1.0.0" \
+            "azure.ai.evaluations 1.0.0-beta.2" \
+            "microsoft.foundry 1.0.0"
+          do
+            set -- $extension
+            AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ext install "$1" \
+              --version "$2" --force --no-prompt
+          done
+
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Configure azd authentication
+        run: |
+          set -euo pipefail
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set auth.useAzCliAuth true
+          AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd config set defaults.subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+
+      - name: Configure azd environment
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+        run: ./.github/scripts/setup-azd-env.sh
+
+      - name: Install agent evaluation tooling
+        working-directory: src/rag_agent
+        run: uv sync --frozen
+
+      - name: Promote rollback version
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/promote.py \
+            --version "${{ inputs.rollback_to_version }}"
+
+      - name: Rollback smoke test
+        run: |
+          set -euo pipefail
+          response=$(AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent invoke rag-agent \
+            --version "${{ inputs.rollback_to_version }}" \
+            --new-session "$SMOKE_QUESTION" 2>&1)
+          echo "$response"
+          echo "$response" | grep -qi "LangGraph"
+          echo "$response" | grep -q "Sources:"
+
+      - name: Point continuous evaluation at the rollback version
+        run: |
+          set -euo pipefail
+          src/rag_agent/.venv/bin/python evals/continuous_eval.py \
+            --version "${{ inputs.rollback_to_version }}"
+
+      - name: Write rollback summary
+        run: |
+          echo "Rolled back production to version \`${{ inputs.rollback_to_version }}\`." >> "$GITHUB_STEP_SUMMARY"
