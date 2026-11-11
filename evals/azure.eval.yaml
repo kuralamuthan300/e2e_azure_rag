@@ -1,0 +1,32 @@
+datasets:
+  - name: dataset
+    file: ./dataset.jsonl
+evals:
+  - name: rag-agent-smoke
+    description: Basic quality evaluation for rag-agent
+    dataset: dataset
+    evaluationLevel: turn
+    evaluators:
+      - evaluator: builtin.groundedness
+        initializationParameters:
+          model: gpt-5.4-mini
+        dataMapping:
+          context: "{{item.ground_truth}}"
+          query: "{{item.query}}"
+      - evaluator: builtin.relevance
+        initializationParameters:
+          model: gpt-5.4-mini
+      - evaluator: builtin.retrieval
+        initializationParameters:
+          model: gpt-5.4-mini
+        dataMapping:
+          context: "{{item.ground_truth}}"
+          query: "{{item.query}}"
+      - evaluator: builtin.response_completeness
+        initializationParameters:
+          model: gpt-5.4-mini
+        dataMapping:
+          ground_truth: "{{item.ground_truth}}"
+    target:
+      type: agent
+      name: rag-agent

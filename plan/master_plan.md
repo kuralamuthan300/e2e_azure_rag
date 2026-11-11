@@ -6,7 +6,7 @@ Build a containerized RAG agent using **LangGraph**, hosted on **Microsoft Found
 
 - Azure AI Search for document retrieval
 - Foundry Models for chat and embeddings
-- A custom web-search MCP server using DuckDuckGo/Brave + `trafilatura`
+- A custom web-search MCP server using free search backends + `trafilatura`
 - Foundry Toolbox to expose AI Search and MCP tools to the agent
 - Foundry Evaluations as the primary RAG quality gate
 - GitHub Actions CI/CD using OIDC, `azd`, and Azure Container Registry
@@ -28,10 +28,10 @@ The agent answers from documents when sufficient evidence exists, falls back to 
 | API gateway | None initially; APIM deferred |
 | Environments | One Foundry project with immutable agent versions |
 | Models | Foundry Models: small chat model + `text-embedding-3-small` |
-| Document store | Azure AI Search, hybrid BM25 + vector retrieval |
+| Document store | Azure AI Search; keyword query active now, hybrid vector deferred until integrated vectorizer is configured |
 | Document ingestion | Python CLI using the Azure AI Search push API (Option A) |
 | Tool management | Foundry Toolbox |
-| Web search | Custom MCP server: DuckDuckGo/Brave + `trafilatura` |
+| Web search | Custom MCP server: DuckDuckGo/Google/Bing via `ddgs` + Google News RSS fallback + `trafilatura` |
 | Web MCP hosting | Azure Container Apps, external HTTPS + bearer key |
 | Evaluation | Foundry Evaluations + deterministic retrieval/routing tests |
 | CI/CD | GitHub Actions + OIDC + `azd` |
@@ -66,7 +66,7 @@ Hosted Agent: rag-agent-langgraph
        └─ mcp → web-search-mcp
 
 Azure AI Search ← ingestion CLI ← Blob Storage / bundled docs
-Azure Container App: web-search-mcp ← ddgs/Brave + trafilatura
+Azure Container App: web-search-mcp ← ddgs + Google News RSS + trafilatura
 ACR ← agent + MCP images
 Foundry Evaluations + Application Insights traces
 ```
@@ -96,7 +96,7 @@ flowchart TB
     end
 
     subgraph Internet["Internet"]
-        W["DuckDuckGo / Brave Search"]
+        W["DuckDuckGo / Google / Bing / Google News RSS"]
         P["Web pages"]
     end
 
@@ -259,7 +259,8 @@ Start with a Python ingestion CLI. This keeps chunking deterministic, makes retr
 Planned command:
 
 ```bash
-python -m app.ingest --source ./data --index rag-docs
+python -m rag_ingest --source ./data --index rag-docs
+# or: rag-ingest --source ./data --index rag-docs
 ```
 
 Required environment variables:
@@ -361,8 +362,9 @@ search_and_read(query, max_results=3)
 
 ### 7.2 Search and extraction
 
-- Primary search: Brave Search API if a free key is available
-- Fallback: `ddgs` (DuckDuckGo)
+- Primary: `ddgs` with free Google, Bing, and DuckDuckGo backends
+- Fallback: Google News RSS when the HTML search backends return no results
+- No Brave Search API key is used
 - Extraction: `trafilatura`
 - Return title, URL, snippet, and cleaned text
 
@@ -576,7 +578,7 @@ The deployment image and eval gate remain the same.
 - OIDC federated credentials; no stored Azure credentials
 - Secrets:
   - MCP bearer key
-  - optional Brave Search API key
+  - no search-provider API key required
 - Variables:
   - Azure subscription ID
   - Azure location
@@ -671,7 +673,7 @@ MCP image:
 
 - Python 3.13
 - MCP server
-- `ddgs` and/or Brave client
+- `ddgs` client with free search backends
 - `trafilatura`
 - Port configured for MCP HTTP transport
 - Non-root user
@@ -681,156 +683,233 @@ MCP image:
 
 ## 12. Repository Layout
 
+**Current layout:** one root Foundry `azd` project with the agent and ingestion CLI under `src/`.
+
 ```text
 .
-├─ azure.yaml
-├─ infra/
-│    ├─ main.bicep
-│    ├─ modules/
-│    │    ├─ foundry.bicep
-│    │    ├─ search.bicep
-│    │    ├─ storage.bicep
-│    │    ├─ mcp-container-app.bicep
-│    │    ├─ observability.bicep
-│    │    └─ role-assignments.bicep
-│    └─ parameters/
+├─ azure.yaml                  # Foundry azd project
+├─ .azure/                     # azd environment state (gitignored)
 ├─ src/
-│    ├─ rag-agent/
+│    ├─ rag_agent/             # Foundry-hosted LangGraph agent
 │    │    ├─ main.py
-│    │    ├─ graph.py
-│    │    ├─ nodes/
-│    │    ├─ prompts/
-│    │    ├─ clients/
+│    │    ├─ langgraph.json
 │    │    ├─ Dockerfile
-│    │    ├─ .dockerignore
 │    │    ├─ pyproject.toml
-│    │    └─ tests/
-│    └─ web-search-mcp/
-│         ├─ server.py
-│         ├─ search.py
+│    │    └─ uv.lock
+│    └─ rag_ingest/            # Azure AI Search ingestion CLI
+│         ├─ cli.py
+│         ├─ chunking.py
+│         ├─ embeddings.py
 │         ├─ extract.py
-│         ├─ security.py
-│         ├─ Dockerfile
-│         ├─ .dockerignore
-│         ├─ pyproject.toml
-│         └─ tests/
-├─ evals/
-│    ├─ dataset.jsonl
-│    ├─ evaluators/
-│    ├─ thresholds.yaml
-│    └─ gate.py
-├─ tests/
-│    ├─ graph/
-│    ├─ retrieval/
-│    └─ integration/
-├─ .github/
-│    └─ workflows/
-│         ├─ ci.yml
-│         └─ cd.yml
+│         ├─ index.py
+│         └─ pipeline.py
+├─ tools/
+│    └─ rag-tools.yaml         # Foundry Toolbox definition
+├─ tests/                      # ingestion tests
 ├─ docs/
-│    ├─ architecture.md
-│    ├─ runbook.md
-│    └─ evaluation.md
-└─ plan/
-     └─ master_plan.md
+│    └─ rag-agent-sample.md
+├─ plan/
+│    └─ master_plan.md
+├─ pyproject.toml              # root ingestion project
+└─ uv.lock
+```
+
+Future additions:
+
+```text
+├─ infra/                      # Bicep modules for MCP Container App and supporting resources
+├─ evals/                      # golden dataset, evaluators, thresholds, gate
+├─ .github/workflows/          # CI/CD
+└─ src/web_search_mcp/         # custom web-search MCP server
 ```
 
 ---
 
 ## 13. Implementation Steps
 
+**Current status:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, and 4.1-4.6 are complete. Agent version `11` is deployed with deterministic RAG/web/hybrid/refuse routing, hybrid vector retrieval, structured citations, and the web-search MCP server. Local and Foundry evaluation baselines are recorded and gated. The next actionable work is **Steps 0.4-0.5 (GitHub OIDC)** and **Phase 5 — CI/CD**.
+
+**Completed out of sequence:**
+
+- [x] Implemented the Azure AI Search ingestion CLI under `src/rag_ingest/`.
+- [x] Added 31 passing tests: 22 ingestion/config tests and 9 web MCP tests.
+- [x] Created the `text-embedding-3-small` Foundry deployment.
+- [x] Created the `rag-docs` index with 1536-dimensional vectors and an integrated vectorizer.
+- [x] Ingested `plan/master_plan.md` as 15 chunks.
+- [x] Verified the indexed content with an Azure AI Search query.
+- [x] Deployed the web-search MCP server and connected it through `rag-tools`.
+
 ### Phase 0: Prerequisites
 
-- **Step 0.1** — Confirm the Azure subscription, Foundry project, model access, and model quota.
-- **Step 0.2** — Verify local tools: `az`, `azd`, Docker, Python 3.13, and Git.
-- **Step 0.3** — Install the required `azd` extensions: `azure.ai.agents`, `azure.ai.projects`, and `azure.ai.toolboxes`.
-- **Step 0.4** — Create GitHub environments `staging` and `production`, with required reviewers on production.
-- **Step 0.5** — Configure GitHub OIDC federation and Azure role assignments.
-- **Step 0.6** — Create or obtain a Brave Search API key, if using Brave as the primary search provider.
+- [x] **Step 0.1** — Confirm the Azure subscription, Foundry project, model access, and model quota.
+  - Azure subscription and Foundry resource confirmed.
+  - `text-embedding-3-small` deployment created and verified.
+  - Chat model deployment still required for the agent.
+- [x] **Step 0.2** — Verify local tools: `az`, `azd`, Docker, Python 3.13, and Git.
+  - `az`, `azd` 1.37.3, Docker 29.6.2, Python 3.14.7, and Git are available.
+  - Python 3.13 is the target runtime for the Foundry container; local development uses 3.14.
+- [x] **Step 0.3** — Install the required `azd` extensions: `azure.ai.agents`, `azure.ai.projects`, and `azure.ai.toolboxes`.
+  - Installed `azure.ai.agents` 1.0.0 with `azure.ai.projects`, `azure.ai.connections`, and `azure.ai.toolboxes` dependencies.
+  - `azd` is not authenticated yet; Step 1.1 is blocked until the user runs `azd auth login`.
+- [ ] **Step 0.4** — Create GitHub environments `staging` and `production`, with required reviewers on production.
+- [ ] **Step 0.5** — Configure GitHub OIDC federation and Azure role assignments.
+- [x] **Step 0.6** — ~~Create or obtain a Brave Search API key.~~ Cancelled: the project uses free search backends with no Brave Search API key.
 
 ### Phase 1: Scaffold Foundry LangGraph agent
 
-- **Step 1.1** — Initialize the `azd` project from the official Foundry LangGraph container sample.
-- **Step 1.2** — Set the Foundry project endpoint, model deployment, subscription, and region in the `azd` environment.
-- **Step 1.3** — Verify `azd ai agent run` locally.
-- **Step 1.4** — Add configuration validation and health checks.
-- **Step 1.5** — Confirm model deployment and local Entra authentication.
-- **Step 1.6** — Run `azd deploy` to verify that a new immutable agent version is created.
+- [x] **Step 1.1** — Initialize the `azd` project from the official Foundry LangGraph container sample.
+  - Scaffolded from `langgraph/responses/02-langgraph-toolbox`.
+  - Project root: repository root (`azure.yaml`).
+  - Agent source: `src/rag_agent/`.
+  - Agent name: `rag-agent`.
+  - Converted from code deploy to container deploy with `language: docker` and `docker.remoteBuild: true`.
+- [x] **Step 1.2** — Set the Foundry project endpoint, model deployment, subscription, and region in the `azd` environment.
+  - Project: `e2e-azure-rag-resource/e2e-azure-rag`.
+  - Model deployment: `gpt-5.4-mini`.
+  - Region: `southindia`.
+- [x] **Step 1.3** — Verify `azd ai agent run` locally.
+  - Agent started on `localhost:8088`.
+  - Local invocation retrieved the indexed master plan via the `search` toolbox tool.
+  - The agent answered the LangGraph routing question from the document.
+- [x] **Step 1.4** — Add configuration validation and health checks.
+  - Added `src/rag_agent/config.py` with fail-fast validation for the project endpoint, model deployment, and toolbox name.
+  - Added `src/rag_agent/healthcheck.py` for configuration and `/readiness` checks.
+  - Added a container `HEALTHCHECK` against `http://127.0.0.1:8088/readiness`.
+  - Added 4 configuration tests; total ingestion/agent config tests: 22.
+- [x] **Step 1.5** — Confirm model deployment and local Entra authentication.
+  - `gpt-5.4-mini` deployment provisioned.
+  - Local invocation authenticated through Entra ID.
+- [x] **Step 1.6** — Run `azd deploy` to verify that a new immutable agent version is created.
+  - Deployed as Foundry agent `rag-agent`; latest successful version at this checkpoint: `11`.
+  - Container image: built and pushed through ACR.
+  - Created ACR with `AZD_FOUNDRY_ACR_MODE=create`.
+  - Granted `AcrPull` to the agent identity `c0c6f6b0-9c2b-4ebe-b363-263e68c3e0e1`.
+  - Remote invocation returned a document-grounded answer.
 
 Exit criteria:
 
-- Local agent responds through the Foundry host adapter.
-- `azd deploy` creates an agent version.
+- [x] Local agent responds through the Foundry host adapter.
+- [x] `azd deploy` creates an agent version.
 
 ### Phase 2: RAG with Azure AI Search
 
-- **Step 2.1** — Create the Azure AI Search service and `rag-docs` index.
-- **Step 2.2** — Build the ingestion CLI with deterministic chunk IDs.
-- **Step 2.3** — Load seed documents from Blob Storage or the local `data/` directory.
-- **Step 2.4** — Generate embeddings with the Foundry embedding deployment.
-- **Step 2.5** — Create the Foundry AI Search connection.
-- **Step 2.6** — Add the `azure_ai_search` tool to the `rag-tools` Toolbox.
-- **Step 2.7** — Implement `retrieve_docs`, `grade_context`, and `answer_from_docs`.
-- **Step 2.8** — Add document citations to the response.
+- [x] **Step 2.1** — Create the Azure AI Search service and `rag-docs` index.
+  - Index created with the required fields and vector profile.
+- [x] **Step 2.2** — Build the ingestion CLI with deterministic chunk IDs.
+  - Implemented in `src/rag_ingest/`.
+- [x] **Step 2.3** — Load seed documents from Blob Storage or the local `data/` directory.
+  - `plan/master_plan.md` ingested as 15 chunks.
+  - Additional corpus documents can be added later.
+- [x] **Step 2.4** — Generate embeddings with the Foundry embedding deployment.
+  - `text-embedding-3-small`, 1536 dimensions.
+- [x] **Step 2.5** — Create the Foundry AI Search connection.
+  - Connection `rag-search-conn` created.
+  - Uses the Foundry project managed identity.
+  - Granted `Search Index Data Reader`, `Search Index Data Contributor`, and `Search Service Contributor` on the search service.
+- [x] **Step 2.6** — Add the `azure_ai_search` tool to the `rag-tools` Toolbox.
+  - Toolbox `rag-tools` created with the `search` tool.
+  - Points at `rag-docs`.
+  - Query type upgraded to `vector_simple_hybrid` after adding the integrated vectorizer.
+- [x] **Step 2.7** — Implement `retrieve_docs`, `grade_context`, and `answer_from_docs`.
+  - Implemented deterministic `MessagesState` graph in `src/rag_agent/graph.py`.
+  - Retrieval uses the Toolbox `search` tool.
+  - Grading uses a direct Foundry Responses SDK call to avoid leaking grader output into the streamed response.
+  - Routes: `rag`, `web`, `hybrid`, `refuse`.
+- [x] **Step 2.8** — Add document citations to the response.
+  - Citations include title, document ID, URL, source, and score.
+  - Citation validity is enforced by deriving sources only from retrieved documents/web results.
+- [x] **Step 2.9** — Configure the Azure AI Search integrated vectorizer.
+  - Search service system-assigned identity enabled.
+  - Granted `Cognitive Services OpenAI User` on the Foundry resource.
+  - Added `AzureOpenAIVectorizer` using `text-embedding-3-small`.
+  - Toolbox query type changed to `vector_simple_hybrid`.
+  - Updated ingestion to preserve the existing vectorizer when re-indexing documents.
 
 Exit criteria:
 
-- A document-answerable question returns `route: rag` with valid citations.
+- [x] A document-answerable question returns `route: rag` with valid citations.
 
 ### Phase 3: Web search MCP
 
-- **Step 3.1** — Build the MCP server with `search_web`, `fetch_clean_text`, and `search_and_read`.
-- **Step 3.2** — Add Brave/DuckDuckGo search and `trafilatura` extraction.
-- **Step 3.3** — Add SSRF protections, timeouts, size limits, and contract tests.
-- **Step 3.4** — Containerize the MCP server.
-- **Step 3.5** — Deploy it to Azure Container Apps with external HTTPS ingress and a bearer key.
-- **Step 3.6** — Create the Foundry MCP connection and add the MCP tool to `rag-tools`.
-- **Step 3.7** — Implement `web_search`, `answer_from_web`, and `answer_hybrid`.
-- **Step 3.8** — Implement the refusal path.
+- [x] **Step 3.1** — Build the MCP server with `search_web`, `fetch_clean_text`, and `search_and_read`.
+  - Implemented in `src/web_search_mcp/`.
+- [x] **Step 3.2** — Add free search backends and `trafilatura` extraction.
+  - `ddgs` backends: Google, Bing, DuckDuckGo.
+  - Google News RSS fallback when HTML search returns no results.
+  - No Brave Search API key.
+- [x] **Step 3.3** — Add SSRF protections, timeouts, size limits, and contract tests.
+  - URL validation, private-IP blocking, redirect checks, request timeouts, response size cap.
+  - 9 MCP server tests.
+- [x] **Step 3.4** — Containerize the MCP server.
+  - Dockerfile with health check, port 8000.
+- [x] **Step 3.5** — Deploy it to Azure Container Apps with external HTTPS ingress and a bearer key.
+  - Container App: `web-search-mcp`.
+  - Environment: `rag-agent-env`.
+  - FQDN: `web-search-mcp.wonderfulwave-cfeafd90.southindia.azurecontainerapps.io`.
+  - `WEB_SEARCH_MCP_TOKEN` stored as a Container App secret.
+- [x] **Step 3.6** — Create the Foundry MCP connection and add the MCP tool to `rag-tools`.
+  - Connection `websearch-mcp` with custom Authorization header.
+  - Toolbox exposes `websearch___search_web_tool`, `websearch___fetch_clean_text_tool`, and `websearch___search_and_read_tool`.
+- [x] **Step 3.7** — Implement `web_search`, `answer_from_web`, and `answer_hybrid`.
+  - Web and hybrid graph nodes implemented.
+  - Direct Foundry SDK answering keeps the response stream clean.
+- [x] **Step 3.8** — Implement the refusal path.
+  - Refuses when both document and web evidence are insufficient.
 
 Exit criteria:
 
-- A question outside the document corpus returns `route: web` with URL citations.
-- A partial question returns `route: hybrid`.
-- An unanswerable question returns `route: refuse`.
+- [x] A question outside the document corpus returns `route: web` with URL citations.
+- [x] A partial question returns `route: hybrid`.
+- [x] An unanswerable question returns `route: refuse`.
 
 ### Phase 4: Evaluation
 
-- **Step 4.1** — Build the golden dataset with document, web, hybrid, unanswerable, and adversarial cases.
-- **Step 4.2** — Configure Foundry groundedness, relevance, retrieval, and tool-call evaluators.
-- **Step 4.3** — Add routing, citation, refusal, recall@k, and MRR tests.
-- **Step 4.4** — Create the threshold gate script.
-- **Step 4.5** — Run the baseline evaluation and calibrate thresholds.
-- **Step 4.6** — Persist the evaluation report as a CI artifact.
+- [x] **Step 4.1** — Build the golden dataset with document, web, hybrid, unanswerable, and adversarial cases.
+  - `evals/dataset.jsonl` contains 21 cases.
+- [x] **Step 4.2** — Configure Foundry groundedness, relevance, retrieval, and response-completeness evaluators.
+  - `evals/azure.eval.yaml` declares the built-in evaluator suite.
+  - Foundry eval: `rag-agent-smoke`.
+- [x] **Step 4.3** — Add routing, citation, refusal, recall@k, and MRR tests.
+  - `evals/run_local.py` computes routing accuracy, citation validity, refusal correctness, recall@5, MRR, answer term coverage, and latency.
+- [x] **Step 4.4** — Create the threshold gate script.
+  - `evals/gate.py` gates local deterministic metrics.
+  - `evals/foundry_gate.py` gates the Foundry pass rate.
+- [x] **Step 4.5** — Run the baseline evaluation and calibrate thresholds.
+  - Local baseline: routing 0.8095, citation validity 1.0, refusal 0.9048, recall@5 0.8095, MRR 0.6667, answer coverage 0.9087, p95 17.6s.
+  - Foundry baseline against agent version 11: 16/21 passed (76.2%); gate set to 60%.
+- [x] **Step 4.6** — Persist the evaluation report as a CI artifact.
+  - `evals/reports/local-latest.json`
+  - `evals/reports/foundry-latest.json`
+  - `evals/reports/gate-latest.json`
 
 Exit criteria:
 
-- `evals/gate.py` produces a pass/fail result against thresholds.
-- Evaluation report is written as a CI artifact.
+- [x] `evals/gate.py` produces a pass/fail result against thresholds.
+- [x] Evaluation report is written as a CI artifact.
 
 ### Phase 5: CI/CD
 
-- **Step 5.1** — Add the PR CI workflow with linting, typing, unit tests, graph tests, MCP contract tests, Docker builds, and Trivy.
-- **Step 5.2** — Add the OIDC-based CD workflow.
-- **Step 5.3** — Deploy a new agent version with `azd deploy`.
-- **Step 5.4** — Run the Foundry evaluation gate.
-- **Step 5.5** — Promote the evaluated version only if the gate passes.
-- **Step 5.6** — Run a production smoke test.
-- **Step 5.7** — Enable continuous evaluation.
+- [ ] **Step 5.1** — Add the PR CI workflow with linting, typing, unit tests, graph tests, MCP contract tests, Docker builds, and Trivy.
+- [ ] **Step 5.2** — Add the OIDC-based CD workflow.
+- [ ] **Step 5.3** — Deploy a new agent version with `azd deploy`.
+- [ ] **Step 5.4** — Run the Foundry evaluation gate.
+- [ ] **Step 5.5** — Promote the evaluated version only if the gate passes.
+- [ ] **Step 5.6** — Run a production smoke test.
+- [ ] **Step 5.7** — Enable continuous evaluation.
 
 Exit criteria:
 
-- A failing eval blocks promotion.
-- A passing eval promotes the version.
-- No Azure credentials are stored in GitHub.
+- [ ] A failing eval blocks promotion.
+- [ ] A passing eval promotes the version.
+- [ ] No Azure credentials are stored in GitHub.
 
 ### Phase 6: Hardening and documentation
 
-- **Step 6.1** — Add prompt-injection tests.
-- **Step 6.2** — Add rate limiting and request size limits.
-- **Step 6.3** — Add structured logging, tracing, and alerts.
-- **Step 6.4** — Write the runbook and architecture documentation.
-- **Step 6.5** — Review cost and scaling settings.
+- [ ] **Step 6.1** — Add prompt-injection tests.
+- [ ] **Step 6.2** — Add rate limiting and request size limits.
+- [ ] **Step 6.3** — Add structured logging, tracing, and alerts.
+- [ ] **Step 6.4** — Write the runbook and architecture documentation.
+- [ ] **Step 6.5** — Review cost and scaling settings.
 
 ---
 
@@ -913,7 +992,7 @@ Exit criteria:
 |---|---|
 | Foundry hosted agents/Toolbox are preview features | Pin `azd` extension versions; follow official samples; isolate integration code |
 | Model quota or region unavailable | Validate model deployment early; make region/model names configurable |
-| DuckDuckGo blocks cloud IPs | Use Brave free tier as primary, DDG as fallback |
+| Search engines rate-limit cloud IPs | Try Google, Bing, and DuckDuckGo backends, then fall back to Google News RSS |
 | Public MCP server abuse | Bearer key, rate limits, timeouts, logging, optional APIM/WAF later |
 | SSRF via page fetch | Strict URL validation, private IP blocking, redirect checks |
 | Prompt injection from web pages | Treat content as data; grounded prompts; no tool execution from page instructions |
@@ -933,7 +1012,7 @@ Exit criteria:
 - Docker for local container builds
 - Python 3.13
 - GitHub repository admin access for OIDC and environments
-- Brave Search API key (optional, recommended)
+- No search-provider API key required
 - Azure AI Search free tier available in the target region
 
 ---
@@ -964,7 +1043,6 @@ Low-cost choices:
 - Azure API Management with API-key auth and custom domain
 - Separate staging/production Foundry projects
 - Separate staging AI Search index
-- Azure AI Search integrated vectorization
 - Multi-turn conversation memory
 - Streaming responses
 - UI frontend
@@ -977,12 +1055,118 @@ Low-cost choices:
 
 ## 21. Next Step
 
-When implementation begins, start in this order:
+**Current position:** Steps 1.1-1.6, 2.1-2.9, 3.1-3.8, and 4.1-4.6 are complete. Agent version `11` is deployed and active with RAG, web, hybrid, and refusal routing plus structured citations. `rag-docs` contains 15 chunks from the updated `plan/master_plan.md`.
 
-1. **Step 0.1-0.6** — Complete prerequisites and GitHub OIDC setup.
-2. **Step 1.1-1.6** — Scaffold the official Foundry LangGraph container sample and deploy a local smoke-tested agent version.
-3. **Step 2.1-2.8** — Add Azure AI Search ingestion and the Toolbox `azure_ai_search` tool.
-4. **Step 3.1-3.8** — Build and connect the web-search MCP server, then complete routing and refusal behavior.
-5. **Step 4.1-4.6** — Add Foundry evaluations and the CI gate.
-6. **Step 5.1-5.7** — Add OIDC-based CD with agent version promotion.
-7. **Step 6.1-6.5** — Harden, document, and review cost.
+**Next action:** configure **Steps 0.4-0.5** (GitHub environments and OIDC), then execute **Phase 5 — CI/CD**.
+
+Remaining order:
+
+2. **Step 0.4-0.5** — Configure GitHub environments and OIDC.
+3. **Step 5.1-5.7** — Add OIDC-based CD with agent version promotion.
+4. **Step 6.1-6.5** — Harden, document, and review cost.
+
+Deferred: Azure AI Search integrated vectorization is complete; Brave Search is not used.
+
+GitHub OIDC setup (Step 0.4-0.5) can be completed before Phase 5; it is not required for local agent development.
+
+---
+
+## 22. Handoff Notes
+
+### Repository state
+
+- Branch: `task/setup`
+- Latest commit before handoff: see `git log -1`
+- Root `azd` project at `azure.yaml`
+- Agent source: `src/rag_agent/`
+- Ingestion CLI: `src/rag_ingest/`
+- Web MCP server: `src/web_search_mcp/`
+- Evaluation: `evals/`
+- Toolbox definition: `tools/rag-tools.yaml`
+
+### Deployed resources
+
+```text
+Subscription:   5671b608-673c-452a-9c23-7dc8790213b2
+Resource group: rg-kuralamuthan300-9046
+Foundry account/project: e2e-azure-rag-resource / e2e-azure-rag
+Foundry endpoint: https://e2e-azure-rag-resource.services.ai.azure.com/api/projects/e2e-azure-rag
+Agent:           rag-agent
+Agent version:   11 (active)
+Chat model:      gpt-5.4-mini
+Embedding model: text-embedding-3-small
+Search service:  e2e-azure-rag-foundry-iq (index: rag-docs)
+Toolbox:         rag-tools
+ACR:             crz4cd2g5kve7ta.azurecr.io
+ACR resource group: rg-rag-agent-dev-foundry
+MCP Container App: web-search-mcp
+MCP environment:   rag-agent-env
+MCP FQDN:          web-search-mcp.wonderfulwave-cfeafd90.southindia.azurecontainerapps.io
+Foundry eval:      rag-agent-smoke
+```
+
+### Important implementation details
+
+- The deployed agent uses a deterministic LangGraph `MessagesState` graph. Do not replace it with `create_agent`.
+- Grading and answer generation use the Foundry Responses SDK directly, not LangChain, so intermediate model output stays out of the streamed response.
+- The toolbox MCP client must forward `x-agent-foundry-call-id` from the Agent Server request context. Without it, connection-backed tools such as Azure AI Search can fail.
+- `ToolboxClient` must match web tool names ending in `search_and_read`, `search_and_read_tool`, `search_web`, or `search_web_tool`.
+- The Azure AI Search index must keep the `openai-vectorizer`. Re-ingestion now preserves the existing vectorizer; do not reintroduce a plain `build_index` that drops it.
+- Web search uses `ddgs` backends Google, Bing, and DuckDuckGo, with Google News RSS fallback. No Brave Search API key is used.
+- The MCP server requires `WEB_SEARCH_MCP_TOKEN`; the token is stored in the Container App secret and in the Foundry connection `websearch-mcp`.
+- The agent identity `c0c6f6b0-9c2b-4ebe-b363-263e68c3e0e1` needs `AcrPull` on the ACR and `Search Index Data Reader` on the search service.
+- The project/account identities need `Search Index Data Reader`, `Search Index Data Contributor`, and `Search Service Contributor` on the search service.
+- The search service system-assigned identity needs `Cognitive Services OpenAI User` on the Foundry resource for the integrated vectorizer.
+- `azd` commands must use `AZURE_DEV_USER_AGENT=microsoft_foundry_skill`.
+- `azd` is authenticated; never run `azd auth login` on the user's behalf.
+
+### Useful commands
+
+```bash
+# Agent lifecycle
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd deploy --no-prompt
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent invoke rag-agent --new-session "<question>"
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai agent monitor rag-agent --session-id <id> --type console --tail 200
+
+# Ingestion
+AZURE_TOKEN_CREDENTIALS=AzureCliCredential \
+AZURE_SEARCH_ENDPOINT=https://e2e-azure-rag-foundry-iq.search.windows.net \
+AZURE_SEARCH_INDEX_NAME=rag-docs \
+AZURE_OPENAI_ENDPOINT=https://e2e-azure-rag-resource.openai.azure.com \
+AZURE_OPENAI_API_VERSION=2024-10-21 \
+AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-small \
+AZURE_EMBEDDING_DIMENSIONS=1536 \
+AZURE_EMBEDDING_BATCH_SIZE=8 \
+uv run python -m rag_ingest --source plan/master_plan.md --index rag-docs
+
+# Local evaluation
+FOUNDRY_PROJECT_ENDPOINT=https://e2e-azure-rag-resource.services.ai.azure.com/api/projects/e2e-azure-rag \
+AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-5.4-mini \
+TOOLBOX_NAME=rag-tools \
+src/rag_agent/.venv/bin/python evals/run_local.py
+
+uv run python evals/gate.py \
+  --report evals/reports/local-latest.json \
+  --thresholds evals/thresholds.yaml
+
+# Foundry evaluation
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval create rag-agent-smoke --path evals --no-prompt
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run start --path evals --wait --fail-on pass-rate=0.60
+AZURE_DEV_USER_AGENT=microsoft_foundry_skill azd ai eval run output export <run-id> \
+  --output-file evals/reports/foundry-latest.json --force --output json
+uv run python evals/foundry_gate.py --run evals/reports/foundry-latest.json --thresholds evals/thresholds.yaml
+```
+
+### Known limitations and next work
+
+- Phase 5 CI/CD is not implemented yet.
+- GitHub environments and OIDC federation (Steps 0.4-0.5) are not configured.
+- Foundry evaluators currently run against the agent's latest version; do not add unsupported `agentVersion` keys to `azure.eval.yaml`.
+- Web search quality and availability can vary because it depends on free search backends.
+- Continuous evaluation is not enabled yet.
+- Add `infra/` Bicep for the MCP Container App and supporting resources as MCP moves toward CI/CD.
+- Phase 6 hardening (prompt-injection tests, rate limits, alerts, runbook, cost review) is not done.
+
+### Suggested next prompt
+
+> Continue the RAG agent project in this repository. Read `plan/master_plan.md`, including the Handoff Notes section. Start with Steps 0.4-0.5 (GitHub environments and OIDC federation) and then implement Phase 5 CI/CD: PR CI with lint/type/unit/graph/MCP contract tests, Foundry eval gate, OIDC-based `azd provision`/`azd deploy`, agent version promotion, production smoke test, and continuous evaluation. Keep the existing deterministic LangGraph routing, hybrid AI Search retrieval, structured citations, and web-search MCP server intact. Do not use Brave Search. Update `plan/master_plan.md` as you complete steps.

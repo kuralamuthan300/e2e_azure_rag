@@ -1,0 +1,15 @@
+name: rag-tools
+description: Azure AI Search and free web search tools for the RAG agent.
+tools:
+  - type: azure_ai_search
+    name: search
+    azure_ai_search:
+      indexes:
+        - project_connection_id: rag-search-conn
+          index_name: rag-docs
+          query_type: vector_simple_hybrid
+          top_k: 5
+  - type: mcp
+    server_label: websearch
+    project_connection_id: websearch-mcp
+    require_approval: never
