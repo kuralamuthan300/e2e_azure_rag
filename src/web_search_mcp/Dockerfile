@@ -3,6 +3,12 @@ FROM python:3.13-slim
 
 ENV PYTHONNOUSERSITE=1
 
+# Apply Debian security updates so the runtime image does not ship known
+# base-image vulnerabilities (zlib, zip, and related packages).
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=uv /uv /uvx /bin/
 
 WORKDIR /app
